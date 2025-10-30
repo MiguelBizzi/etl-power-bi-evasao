@@ -244,6 +244,9 @@ def process_ibge_motivos():
     out = PROCESSED_DIR / "ibge_motivos.csv"
 
     # Collect (ano, motivo, sexo, faixa_etaria, valor)
+    # Agora restringimos a Sexo (Masculino/Feminino) e Faixas (15 a 17, 18 a 24, 25 a 29)
+    # e, caso não exista cruzamento explícito sexo×faixa, estimamos via alocação proporcional
+    # usando as marginais de Sexo e de Faixa para cada motivo/ano, normalizando para o total do motivo.
     records = []
 
     files = []
@@ -259,6 +262,9 @@ def process_ibge_motivos():
 
     phrase = "Motivos de ter parado de frequentar escola (%)"
 
+    TARGET_SEX_LABELS = ["Masculino", "Feminino"]
+    TARGET_AGE_LABELS = ["15 a 17 anos", "18 a 24 anos", "25 a 29 anos"]
+
     for year, path in files:
         with path.open("r", encoding="utf-8-sig", newline="") as f_in:
             rows = list(csv.reader(f_in))
@@ -266,54 +272,49 @@ def process_ibge_motivos():
         motives_header_row = None
         motives_start_idx = None
         totals_row = None
-        data_rows = []
 
-        # Find phrase row, next row is header of motives
-        header_index = None
+        # Armazenar marginais por sexo e por faixa (por motivo)
+        sex_marginals: dict[str, dict[str, float]] = {"Masculino": {}, "Feminino": {}}
+        age_marginals: dict[str, dict[str, float]] = {age: {} for age in TARGET_AGE_LABELS}
+
+        # Find phrase row, next non-empty row is header of motives
+        phrase_row_idx = None
+        header_row_idx = None
         for i, row in enumerate(rows):
             if not row:
                 continue
             joined = ",".join([c or "" for c in row])
             if phrase in joined:
-                header_index = i
+                phrase_row_idx = i
                 break
 
-        if header_index is not None:
-            for j in range(header_index + 1, len(rows)):
+        if phrase_row_idx is not None:
+            for j in range(phrase_row_idx + 1, len(rows)):
                 cand = rows[j]
-                if cand and any(cell.strip() for cell in cand):
+                if cand and any((cell or "").strip() for cell in cand):
                     motives_header_row = cand
+                    header_row_idx = j
                     break
 
         if motives_header_row:
             for idx in range(2, len(motives_header_row)):
-                if motives_header_row[idx].strip():
+                if (motives_header_row[idx] or "").strip():
                     motives_start_idx = idx
                     break
 
-        # First row starting with 'Total'
-        for row in rows:
-            if row and row[0].strip().startswith("Total"):
-                totals_row = row
-                break
-
-        # Gather all non-empty rows after header for potential breakdowns
-        if motives_header_row and motives_start_idx is not None:
-            header_found = False
-            for row in rows:
-                if not header_found:
-                    if row is motives_header_row:
-                        header_found = True
-                    continue
-                if not row or not any(cell.strip() for cell in row):
-                    continue
-                data_rows.append(row)
+        # First 'Total' row after header
+        if header_row_idx is not None:
+            for k in range(header_row_idx + 1, len(rows)):
+                r0 = (rows[k][0] or "").strip() if rows[k] else ""
+                if r0.startswith("Total"):
+                    totals_row = rows[k]
+                    break
 
         def normalize_sex(label: str) -> str | None:
             l = label.strip().lower()
-            if l.startswith("homens") or l == "masculino":
+            if l.startswith("homem") or l == "masculino":
                 return "Masculino"
-            if l.startswith("mulheres") or l == "feminino":
+            if l.startswith("mulher") or l == "feminino":
                 return "Feminino"
             return None
 
@@ -325,40 +326,105 @@ def process_ibge_motivos():
                 return False
             return any(ch.isdigit() for ch in l) and (" a " in l or "anos" in l)
 
-        # 1) Totais gerais
-        if motives_header_row and motives_start_idx is not None and totals_row:
+        if motives_header_row is None or motives_start_idx is None:
+            continue
+
+        # 1) Capturar totais gerais por motivo (percentual total do motivo no universo)
+        totals_by_motive: dict[str, float] = {}
+        if totals_row:
             for idx in range(motives_start_idx, len(motives_header_row)):
-                name = motives_header_row[idx].strip()
+                name = (motives_header_row[idx] or "").strip()
                 if not name:
                     continue
                 val = _to_float(totals_row[idx] if idx < len(totals_row) else "")
-                records.append([year, name, "Total", "Total", f"{val:.2f}"])
+                totals_by_motive[name] = val
 
-        # 2) Quebra por sexo (linhas cujo rótulo indica sexo)
-        for row in data_rows:
-            label = (row[0] or "").strip()
-            sex = normalize_sex(label)
-            if not sex:
+        # 2) Varredura por seções: Sexo e Grupos de idade
+        mode = None  # None | 'sexo' | 'faixa'
+        for r in range(header_row_idx + 1, len(rows)):
+            row = rows[r]
+            if not row:
                 continue
-            for idx in range(motives_start_idx, len(motives_header_row)):
-                name = motives_header_row[idx].strip()
-                if not name:
-                    continue
-                val = _to_float(row[idx] if idx < len(row) else "")
-                records.append([year, name, sex, "Total", f"{val:.2f}"])
+            first = (row[0] or "").strip()
+            if not first:
+                continue
+            # Detecta início de seções
+            if first.lower().startswith("sexo"):
+                mode = 'sexo'
+                continue
+            if first.lower().startswith("grupos de idade"):
+                mode = 'faixa'
+                continue
+            # Mudança para outras seções: interrompe modo
+            if first.lower().startswith("cor ou raça") or first.lower().startswith("cor ou raça e sexo") or first.lower().startswith("situação de atividade") or first.lower().startswith("classes de percentual") or first.lower().startswith("nível de instrução") or first.lower().startswith("condição na unidade") or first.lower().startswith("situação do domicílio") or first.lower().startswith("grupos de idade com que") or first.lower().startswith("fonte") or first.lower().startswith("notas"):
+                mode = None
+                continue
 
-        # 3) Quebra por faixa etária (linhas que parecem faixa etária)
-        for row in data_rows:
-            label = (row[0] or "").strip()
-            if not is_age_band(label):
+            if mode == 'sexo':
+                sex = normalize_sex(first)
+                if sex in TARGET_SEX_LABELS:
+                    for idx in range(motives_start_idx, len(motives_header_row)):
+                        name = (motives_header_row[idx] or "").strip()
+                        if not name:
+                            continue
+                        val = _to_float(row[idx] if idx < len(row) else "")
+                        sex_marginals[sex][name] = val
                 continue
-            faixa = label
+
+            if mode == 'faixa' and is_age_band(first):
+                faixa = first
+                if faixa in TARGET_AGE_LABELS:
+                    for idx in range(motives_start_idx, len(motives_header_row)):
+                        name = (motives_header_row[idx] or "").strip()
+                        if not name:
+                            continue
+                        val = _to_float(row[idx] if idx < len(row) else "")
+                        age_marginals[faixa][name] = val
+
+        # 3) Geração do cruzamento sexo×faixa por motivo via:
+        #    - dados explícitos (se existirem — não há nessas tabelas), ou
+        #    - fallback por alocação proporcional com base nas marginais e no total do motivo
+        motive_names: list[str] = []
+        if motives_header_row and motives_start_idx is not None:
             for idx in range(motives_start_idx, len(motives_header_row)):
-                name = motives_header_row[idx].strip()
-                if not name:
-                    continue
-                val = _to_float(row[idx] if idx < len(row) else "")
-                records.append([year, name, "Total", faixa, f"{val:.2f}"])
+                nm = (motives_header_row[idx] or "").strip()
+                if nm:
+                    motive_names.append(nm)
+
+        for motive in motive_names:
+            total_pct = totals_by_motive.get(motive, 0.0)
+            if total_pct <= 0:
+                continue
+
+            male = sex_marginals.get("Masculino", {}).get(motive, 0.0)
+            female = sex_marginals.get("Feminino", {}).get(motive, 0.0)
+            a15 = age_marginals.get("15 a 17 anos", {}).get(motive, 0.0)
+            a18 = age_marginals.get("18 a 24 anos", {}).get(motive, 0.0)
+            a25 = age_marginals.get("25 a 29 anos", {}).get(motive, 0.0)
+
+            # Pesos iniciais: produto externo das marginais (independência),
+            # normalizados para que a soma dos 6 seja 1, depois multiplicamos por total_pct
+            row = [max(male, 0.0), max(female, 0.0)]
+            col = [max(a15, 0.0), max(a18, 0.0), max(a25, 0.0)]
+            weights = []
+            for rv in row:
+                for cv in col:
+                    weights.append(rv * cv)
+            s = sum(weights)
+            if s <= 0:
+                # Caso extremo: dividir igualmente entre as 6 células
+                weights = [1.0] * 6
+                s = 6.0
+            weights = [w / s for w in weights]
+
+            # Mapear de volta para (sexo, faixa)
+            combos = [
+                ("Masculino", "15 a 17 anos"), ("Masculino", "18 a 24 anos"), ("Masculino", "25 a 29 anos"),
+                ("Feminino", "15 a 17 anos"), ("Feminino", "18 a 24 anos"), ("Feminino", "25 a 29 anos"),
+            ]
+            for (sex, faixa), w in zip(combos, weights):
+                pct = total_pct * w
+                records.append([year, motive, sex, faixa, f"{pct:.2f}"])
 
     # Write output merged for all years
     with out.open("w", encoding="utf-8", newline="") as f_out:
