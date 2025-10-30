@@ -94,6 +94,11 @@ WHERE nivel IS NOT NULL
 ON CONFLICT (nivel) DO NOTHING;
 
 -- dim_perfil_socio
+-- Limpeza de registros fora do recorte (sexo/faixa não permitidos)
+DELETE FROM dw.dim_perfil_socio
+WHERE sexo NOT IN ('Masculino','Feminino')
+   OR faixa_etaria NOT IN ('15 a 17 anos','18 a 24 anos','25 a 29 anos');
+
 INSERT INTO dw.dim_perfil_socio(sexo, faixa_etaria, motivo_evasao)
 SELECT DISTINCT sexo, faixa_etaria, motivo
 FROM transformacao.mvw_ibge_integrado
