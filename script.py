@@ -1,5 +1,6 @@
 import csv
 import os
+import random
 from pathlib import Path
 
 # Paths
@@ -176,6 +177,26 @@ def process_inep_distorcao():
             disto_med = _to_float(g(col_map["disto_med"]))
             if disto_med:
                 writer.writerow([ano, regiao, uf_code, dependencia, "Medio", f"{disto_med:.2f}"])
+
+
+def mock_process_ibge_analfabetismo():
+    """Mock process that generates ibge_analfabetismo.csv with random values between 0 and 20."""
+    out = PROCESSED_DIR / "ibge_analfabetismo.csv"
+    
+    years = ["2016", "2017", "2018", "2019", "2022", "2023"]
+    
+    rows_out = []
+    
+    for year in years:
+        for region, ufs in sorted(REGION_TO_UFS.items()):
+            for uf in sorted(ufs):
+                rate = round(random.uniform(0, 20), 2)
+                rows_out.append([year, region, uf, f"{rate:.2f}"])
+    
+    with out.open("w", encoding="utf-8", newline="") as f_out:
+        writer = csv.writer(f_out, delimiter=";")
+        writer.writerow(["ano", "regiao", "uf", "taxa_analfabetismo"])
+        writer.writerows(rows_out)
 
 
 def process_ibge_analfabetismo():
@@ -436,7 +457,7 @@ def process_ibge_motivos():
 def main():
     process_inep_rendimento()
     process_inep_distorcao()
-    process_ibge_analfabetismo()
+    mock_process_ibge_analfabetismo()
     process_ibge_motivos()
     print(f"Arquivos gerados em: {PROCESSED_DIR}")
 
